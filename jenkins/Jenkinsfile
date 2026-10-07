@@ -1,0 +1,113 @@
+pipeline {
+
+    agent any
+
+    environment {
+        IMAGE_NAME = "YOUR_DOCKERHUB_USERNAME/cloud-devops-api"
+        IMAGE_TAG  = "${BUILD_NUMBER}"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                dir('app') {
+                    sh 'npm ci'
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                dir('app') {
+                    sh 'npm test'
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh """
+                    docker build \
+                    -t ${IMAGE_NAME}:${IMAGE_TAG} \
+                    app
+                """
+            }
+        }
+
+        stage('Security Scan') {
+            steps {
+                sh """
+                    trivy image \
+                    --exit-code 1 \
+                    --severity HIGH,CRITICAL \
+                    ${IMAGE_NAME}:${IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+
+                    sh '''
+                        echo "$DOCKER_PASSWORD" | docker login \
+                            -u "$DOCKER_USERNAME" \
+                            --password-stdin
+
+                        docker push ${IMAGE_NAME}:${IMAGE_TAG}
+
+                        docker logout
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh """
+                    kubectl -n cloud-devops set image \
+                    deployment/cloud-devops-api \
+                    api=${IMAGE_NAME}:${IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Verify Rollout') {
+            steps {
+                sh """
+                    kubectl -n cloud-devops rollout status \
+                    deployment/cloud-devops-api \
+                    --timeout=120s
+                """
+            }
+        }
+    }
+
+    post {
+
+        success {
+            echo 'Pipeline completed successfully.'
+        }
+
+        failure {
+            echo 'Pipeline failed. Check the failed stage and logs.'
+        }
+
+        always {
+            echo "Build: ${BUILD_NUMBER}"
+        }
+    }
+}
